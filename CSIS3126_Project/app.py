@@ -3,6 +3,8 @@ from flask import Flask, render_template, request, redirect, url_for, session, f
 from flask_mysqldb import MySQL
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from datetime import datetime
+from MySQLdb import cursors
 import os
 
 # Initialize Flask app and MYSQL connection
@@ -68,7 +70,7 @@ def login():
                 print("Password mismatch")
                 flash('invalid credentials, please try again', 'danger')
         else:
-            # Debugging: user not founf
+            # Debugging: user not found
             print("User not found")
             flash('invalid credentials, please try again', 'danger')
 
@@ -110,7 +112,7 @@ def create_post():
     if image:
         filename = secure_filename(image.filename)
         image_url = os.path.join('static', 'uploads', filename)
-        image.save(os.path.join('app', image_url))
+        image.save(os.path.join(app.config['UPLOAD_FOLDER'],filename))
 
         conn = mysql.connection
         cursor = conn.cursor()
@@ -164,6 +166,52 @@ def like_post(post_id):
 
     flash('Post liked!', 'success')
     return redirect(url_for('home'))
+
+# Messaging Route
+@app.route('/messages', methods=['GET', 'POST'])
+def messages():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    
+    # Fetch messages for logged-in user
+    conn = mysql.connection
+    cursor = conn.cursor(cursors.DictCursor)
+    cursor.execute(''' 
+        SELECT messages.id, messages.content, messages.timestamp, 
+               sender.username AS sender_username, receiver.username AS receiver_username, 
+               receiver.id AS receiver_id
+        FROM messages
+        JOIN users AS sender ON messages.sender_id = sender.id
+        JOIN users AS receiver ON messages.receiver_id = receiver.id
+        WHERE sender.id = %s OR receiver.id = %s
+        ORDER BY messages.timestamp ASC
+    ''', (session['user_id'], session['user_id']))
+    messages = cursor.fetchall()
+    cursor.close()
+    return render_template('messaging.html', messages=messages, user_id=session['user_id'])
+
+# Route to send a new message
+@app.route('/send_message/<int:receiver_id>', methods=['POST'])
+def send_message(receiver_id):
+    if 'user_id' not in session:
+        flash('You must be logged in to send a message', 'danger')
+        return redirect(url_for('login'))
+    
+    content = request.form['message']
+
+    # insert message into database
+    conn = mysql.connection
+    cursor = conn.cursor()
+    cursor.execute('''
+                   INSERT INTO messages (sender_id, receiver_id, content)
+                   VALUES (%s, %s, %s)
+                ''', (session['user_id'], receiver_id, content))
+    conn.commit()
+    cursor.close()
+
+    flash('Message Sent!', 'success')
+    return redirect(url_for('messages'))
+
 
 # Manage Profile route
 @app.route('/profile', methods=['GET'])  
