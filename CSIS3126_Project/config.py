@@ -1,6 +1,7 @@
 # config.py
 import os
 
+ # !!!! Create placeholders for MYSQL variables
 class Config:
     SECRET_KEY = os.urandom(24)
     MySQL_HOST = 'localhost'
