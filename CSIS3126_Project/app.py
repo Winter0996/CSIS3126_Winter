@@ -85,29 +85,48 @@ def login():
 # Home route
 @app.route('/home', methods=['GET'])
 def home(): 
+    user_id = session.get("user_id")
     if 'user_id' not in session:
         return redirect(url_for('login'))  # redirect to login if user is not logged in 
     
-    # fetch all posts along with comments and like counts
-    conn = mysql.connection
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT posts.id, posts.content, posts.image_url, posts.created_at, 
-               users.username, COUNT(likes.id) AS like_count,
-                GROUP_CONCAT(comments.content SEPARATOR '|||') AS comments
-        FROM posts
-        LEFT JOIN users ON posts.user_id = users.id
-        LEFT JOIN likes ON posts.id = likes.post_id
-        LEFT JOIN comments ON posts.id = comments.post_id
-        GROUP BY posts.id
-        ORDER BY posts.created_at DESC''')
-    posts = cursor.fetchall()
-    cursor.close()
-
-    return render_template('home.html', posts=posts)
-
-
+    cursor = mysql.connection.cursor()
     
+    # fetch all posts with user info and likes
+    cursor.execute("""
+        SELECT posts.id, posts.content, posts.image_url, posts.created_at,
+               users.username, posts.likes, users.avatar_url
+        FROM posts
+        JOIN users ON posts.user_id = users.id
+        ORDER BY posts.created_at DESC
+    """)
+    posts = cursor.fetchall()
+
+    # Fetch comments for each post
+    comments_post = []
+    for post in posts:
+        post_id = post[0]
+        cursor.execute("""
+                       SELECT users.avatar_url, users.username, comments.content
+                       FROM comments
+                       JOIN users ON comments.user_id = users.id
+                       WHERE comments.post_id = %s
+                       ORDER BY comments.created_at ASC
+                       """, (post_id,))
+        comment_rows = cursor.fetchall()
+        comment_data = '|||'.join(['__SEP__'.join(row) for row in comment_rows])
+
+        # Check if user liked this post
+        cursor.execute("""
+                       SELECT 1 FROM likes WHERE user_id = %s AND post_id = %s
+                       """, (user_id, post_id))
+        user_liked = cursor.fetchone() is not None
+
+        comments_post.append(post +(comment_data, user_liked))
+    
+
+    cursor.close()
+    return render_template('home.html', posts=comments_post)
+
 # Route to leave a comment
 @app.route('/comment', methods=['POST'])
 def add_comment():
@@ -133,21 +152,36 @@ def add_comment():
 # Route to like a post
 @app.route('/like/<int:post_id>', methods=['POST'])
 def like_post(post_id):
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 403
+    
     cursor = mysql.connection.cursor()
 
-    #Update likes
-    cursor.execute("UPDATE posts SET likes = likes + 1 WHERE id = %s", (post_id,))
-    mysql.connection.commit()
+    # Check if user already liked this post 
+    cursor.execute("Select 1 FROM likes WHERE user_id = %s AND post_id = %s", (user_id, post_id))
+    already_liked = cursor.fetchone()
+
+    if already_liked:
+        # Unlike post
+        cursor.execute("DELETE FROM likes WHERE user_id = %s AND post_id = %s", (user_id, post_id))
+    else:
+        # like post
+        cursor.execute("INSERT INTO likes (user_id, post_id) VALUES (%s, %s)", (user_id, post_id))
+
+    #Update total like count
+    cursor.execute("SELECT COUNT(*) FROM likes WHERE post_id = %s", (post_id,))
+    like_count = cursor.fetchone()[0]
 
     # fetch new like count 
-    cursor.execute("SELECT likes FROM posts WHERE id = %s",(post_id,))
-    row = cursor.fetchone()
+    cursor.execute("UPDATE posts SET likes = %s WHERE id = %s", (like_count, post_id))
+    mysql.connection.commit()
     cursor.close()
 
-    if row: 
-        return jsonify({'likes': row[0]})
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return jsonify({"new_like_count": like_count})
     else:
-        return jsonify({'error': 'Post not found'}), 404
+        return redirect(url_for("home"))
 
 # Route to create a new post
 @app.route('/post', methods=['POST'])
@@ -210,6 +244,7 @@ def messages():
         cursor.execute("SELECT id, username, avatar_url FROM users WHERE id = %s", (chat_with,))
         active_chat_user = cursor.fetchone()
 
+
         # If  user exists, fetch messages
         if active_chat_user:
             cursor.execute('''
@@ -257,46 +292,68 @@ def send_message(receiver_id):
 
 
 # Manage Profile route
-@app.route('/profile', methods=['GET'])  
+@app.route('/profile', methods=['GET'])
 def manage_profile():
     if 'user_id' not in session:
+        flash("You need to log in first.", "danger")
         return redirect(url_for('login'))
     
-    conn = mysql.connection
-    cursor = conn.cursor()
-    cursor.execute(''' SELECT username, bio, avatar_url FROM users WHERE id = %s''', (session['user_id'],))
+    user_id = session.get('user_id')
+    
+    cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+
+    # Fetch user data
+    cursor.execute("SELECT username, email, bio, avatar_url FROM users WHERE id = %s", (user_id,))
     user = cursor.fetchone()
+
+    # Fetch total post count
+    cursor.execute("SELECT COUNT(*) AS post_count FROM posts WHERE user_id = %s", (user_id,))
+    post_count = cursor.fetchone()['post_count'] or 0 # if no posts are found, show 0 
+
     cursor.close()
 
-    return render_template('manage_profile.html', user=user)
+    return render_template('manage_profile.html', user=user, post_count=post_count)
 
-@app.route('/profile/update', methods=['POST'])
+
+
+@app.route('/update_profile', methods=['POST'])
 def update_profile():
     if 'user_id' not in session:
+        flash("You need to log in first.", "danger")
         return redirect(url_for('login'))
     
-    bio = request.form.get('bio')
-    avatar = request.files.get('avatar')
+    user_id = session['user_id']
+    new_bio = request.form.get('bio')
+    new_email = request.form.get('email')
+
+    avatar_file = request.files.get('avatar')
     avatar_url = None
 
-    if avatar:
-        filename = secure_filename(avatar.filename)
-        avatar_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        avatar.save(avatar_path)
-        avatar_url = f'uploads/{filename}'
+    cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
 
-        conn = mysql.connection
-        cursor = conn.cursor()
-        if avatar_url: 
-            cursor.execute('''UPDATE users SET bio = %s, avatar_url = %s WHERE id = %s''', (bio, avatar_url, session['user_id']))
-        else:
-            cursor.execute('''UPDATE users SET bio = %s WHERE id = %s''', (bio, session['user_id']))
+    # Checking if user wants to edit profile 
+    if avatar_file and allowed_file(avatar_file.filename):
+        filename = secure_filename(avatar_file.filename)
+        unique_filename = str(uuid.uuid4()) + "_" + filename
+        avatar_path = os.path.join('static/images', unique_filename)
+        avatar_file.save(avatar_path)
+        avatar_url = f'images/{unique_filename}'
 
-        conn.commit()
-        cursor.close()
+        # Update avatar
+        cursor.execute("""
+                       UPDATE users SET bio = %s, email = %s, avatar_url = %s WHERE id = %s
+                       """, (new_bio, new_email, avatar_url, user_id))
+    else:
+            # Only update bio & email
+            cursor.execute("""
+                           UPDATE users SET bio = %s, email = %s WHERE id = %s
+                           """, (new_bio, new_email, user_id))
+        
+    mysql.connection.commit()
+    cursor.close()
 
-        flash('Profile updated!', 'success')
-        return redirect(url_for('manage_profile'))
+    flash("Profile Updated Successfully!", "success")
+    return redirect(url_for('manage_profile'))
 
 # Logout route
 @app.route('/logout')

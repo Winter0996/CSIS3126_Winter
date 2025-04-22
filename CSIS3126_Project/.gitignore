@@ -1,0 +1,12 @@
+# Ignore compiled files & cache
+__pycache__/
+*.pyc
+
+# Ignore virtual environment 
+venv/
+
+# Ignore IDE/project files
+.vscode/
+*.log
+
+# keep schema.sql

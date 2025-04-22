@@ -1,43 +1,44 @@
-// Like Button handling for liking a post and animating the like count 
-document.addEventListener("DOMContentLoaded", function () {
-    const likeButtons = document.querySelectorAll(".like-button");
 
-    likeButtons.forEach(button => {
-        button.addEventListener("click", function (event) {
-            event.preventDefault(); 
-            
-            const form = button.closest("form");
-            const postCard = button.closest(".post-card");
-            const likeCountElement = postCard.querySelector(".like-count");
+document.addEventListener("DOMContentLoaded", () => {
+    const likeForms = document.querySelectorAll(".like-form");
 
-            if (form && likeCountElement) {
-                const formData = new FormData(form);
-                const postId = form.action.split("/").pop();
+    likeForms.forEach( form => {
+        form.addEventListener("submit", async (e) => {
+            e.preventDefault();
 
-                fetch(form.action, {
+            const postId = form.dataset.postId;
+            const likeCountElement = document.getElementById(`like-count-${postId}`);
+            const button = form.querySelector(".like-button");
+            const icon = button.querySelector(".material-symbols-outlined");
+
+            try {
+                const response = await fetch(`/like/${postId}`, {
                     method: "POST",
-                    body: formData,
-                })
-                .then(response => response.json())
-                .then(data => {
-                    // Update llike count with animation
-                    if (data.likes !== undefined) {
-                    let newLikes = data.likes;
+                    headers: {
+                        "X-Requested-With": "XMLHttpRequest"
+                    }
+                });
 
-                    likeCountElement.classList.add('animating');
-                    likeCountElement.innerText = newLikes;
+                if (response.ok) {
+                    const data = await response.json();
 
+                    // update like count 
+                    likeCountElement.innerText = data.new_like_count;
+
+                    // Toggle like class
                     button.classList.toggle("liked");
 
+                    // animation
+                    icon.classList.add("animate-like");
                     setTimeout(() => {
-                        likeCountElement.classList.remove("animating");
+                        icon.classList.remove("animate-like");
                     }, 500);
-                }
-            })
-                .catch(error => {
-                    console.error("like failed:", error);
-                });
+                } else {
+                    console.error("error liking post.")
             }
-        });
+        } catch (error) {
+            console.error("network error:", error)
+            }
+         });
     });
 });
